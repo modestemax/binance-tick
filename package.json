@@ -1,0 +1,19 @@
+{
+  "name": "position-manager",
+  "version": "1.0.0",
+  "description": "",
+  "main": "scr/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "max",
+  "license": "ISC",
+  "dependencies": {
+    "binance-api-node": "^0.8.2",
+    "bluebird": "^3.5.1",
+    "common": "file:../common",
+    "debug": "^3.1.0",
+    "lodash": "^4.17.10",
+    "redis": "^2.8.0"
+  }
+}
