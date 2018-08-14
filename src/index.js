@@ -1,121 +1,233 @@
-const debug = require('debug')('trade');
-const _ = require('lodash');
-const { strategies, exchangeIds } = require('common/settings');
-const { auth, loadOrders, saveOder,saveSellOder, delOder,/* delExpiredOrders,*/ saveTrade, loadOrder, computeChange,
-    getFreeBalance, loadMarkets, loadTrades, saveBalances, loadOrderStrategy, publish } = require('common');
+const debug = require("debug")("trade");
+const _ = require("lodash");
+const { strategies, exchangeIds } = require("common/settings");
+const {
+  auth,
+  loadOrders,
+  saveOder,
+  saveSellOder,
+  delOder,
+  /* delExpiredOrders,*/ saveTrade,
+  loadOrder,
+  computeChange,
+  getFreeBalance,
+  loadMarkets,
+  loadTrades,
+  loadTrade,
+  loadBalances,
+  delTrade,
+  saveBalances,
+  loadOrderStrategy,
+  publish
+} = require("common");
 
-
-const Binance = require('binance-api-node').default;
+const Binance = require("binance-api-node").default;
 const client = Binance({ apiKey: auth.api_key, apiSecret: auth.secret });
 
-start();
+// const tickersClean = [];
+//startup
+cleanOrders().then(start);
+
+/**
+ * delete orders saved in redis database which don't exists in binance
+ */
+async function cleanOrders() {
+  let orders = await loadOrders();
+  let binanceOrders = [];
+  _.forEach(orders, async order => {
+    let binOrders = (binanceOrders[order.symbolId] =
+      binanceOrders[order.symbolId] ||
+      (await client.openOrders({ symbol: order.symbolId })));
+
+    if (!_.find(binOrders, { newClientOrderId: order.newClientOrderId })) {
+      delOder(order);
+    }
+  });
+}
+
+// async function cleanTrades() {
+//   const exchangeId = "binance";
+//   const [trades, balances, exchange] = await Promise.all([
+//     loadTrades(),
+//     loadBalances(exchangeId, true),
+//     loadMarkets({ exchangeId })
+//   ]);
+
+//   _.forEach(trades, async trade => {
+//     if (!balances[exchange.marketsById[trade.symbolId].baseId].total) {
+//       delTrade(trade);
+//     }
+//   });
+// }
 
 async function start() {
-    delExpiredOrders();
-    onUserData();
-    (await loadTrades()).forEach(observeTrade);
-    debug('started')
-}
+  cancelExpiredOrders();
+  onUserData();
+  let balances = (await client.accountInfo()).balances;
+  await saveBalances("binance", balances);
+  balances = await loadBalances("binance");
 
-function delExpiredOrders() {
-    _.forEach(loadOrders(), delExpiredOrder)
-}
+  //check here
 
-async function delExpiredOrder(order, strategy) {
-    let { orderTime, orderId } = order;
-    let now = Date.now();
-    strategy = strategy || await loadOrderStrategy(order);
-
-    let { cancelBidAfterSecond } = strategy;
-    if (now - orderTime > cancelBidAfterSecond * 1e3) {
-        publish('cancelOrder', JSON.stringify(order))
+  (await loadTrades()).forEach(trade => {
+    let base = trade.symbolId
+      .split("")
+      .splice(0, trade.symbolId.length - 3)
+      .join("");
+    if (balances[base] && balances[base].total) {
+      observeTrade(trade);
     } else {
-        delExpiredOrder[orderId] = setTimeout(() => delExpiredOrder(order, strategy),
-            (orderTime + cancelBidAfterSecond * 1e3) - now)
+      delTrade(trade);
     }
+  });
+  debug("started");
+}
 
+//-----------ORDERS--------------
+
+function cancelExpiredOrders() {
+  _.forEach(loadOrders(), cancelExpiredOrder);
 }
-function createOrder(order) {
-    saveOder(order);
-    delExpiredOrder(order);
+
+async function cancelExpiredOrder(order, strategy) {
+  let { orderTime, orderId, symbolId } = order;
+  let now = Date.now();
+  strategy = strategy || (await loadOrderStrategy(order));
+
+  let { cancelBidAfterSecond } = strategy;
+  if (now - orderTime > cancelBidAfterSecond * 1e3) {
+    publish("cancelOrder", order);
+  } else {
+    cancelExpiredOrder[orderId] = setTimeout(
+      () => cancelExpiredOrder(order, strategy),
+      orderTime + cancelBidAfterSecond * 1e3 - now
+    );
+  }
 }
-function createSellOrder(order) {
-    saveSellOder(order);
+
+async function createOrder(order) {
+  saveOder(order);
+  cancelExpiredOrder(order);
 }
+
 function deleteOrder(order) {
-    delOder(order);
-    clearInterval(delExpiredOrder[order.orderId]);
-    delete delExpiredOrder[order.orderId];
+  delOder(order);
+  clearInterval(cancelExpiredOrder[order.orderId]);
+  delete cancelExpiredOrder[order.orderId];
 }
 
+//---------------TRADES----------
+function deleteTrade(trade) {
+  //  clearTick(trade);
+  delTrade(trade);
+}
+
+//---------TICKERS---------------
 function listenTick(symbol, onTick) {
-    client.ws.ticker([symbol], onTick);
+  return client.ws.ticker([symbol], onTick);
 }
 
-function onUserData() {
-    client.ws.user(async msg => {
-        switch (msg.eventType) {
-            case "executionReport":
-                const order = Object.assign({ symbolId: msg.symbol }, msg);
-                delete order.symbol;
-                switch (msg.side) {
-                    case 'BUY':
-                        switch (msg.orderStatus) {
-                            case 'NEW':
-                                //new order           
-                                debug('new order detected ' + order.symbolId);
-                                createOrder(order)
-                                break;
-                            case 'FILLED':
-                                //filled bid                      
-                                await saveTrade(order);
-                                deleteOrder(order)
-                                observeTrade(order);
-                                publish('newTrade', order.newClientOrderId);
-                                break;
-                            case 'EXPIRED':
-                                //filled bid
-                                debug('order expired ' + order.symbolId);
-                                deleteOrder(order)
-                                break;
-                            case 'CANCELED':
-                                debug('order CANCELED ' + order.symbolId);
-                                order.newClientOrderId = msg.originalClientOrderId;
-                                deleteOrder(order)
-                                break;
+// async function clearTick({ symbolId }) {
+//   let trades = await loadTrades({ symbolId });
+//   if (trades.length<=1 && tickersClean[symbolId]) {
+//     tickersClean[symbolId]();
+//     delete tickersClean[symbolId];
+//   }
+// }
 
-                        }
-                        break;
-                    case 'SELL':
-                        switch (msg.orderStatus) {
-                            case 'NEW':
-                                //new order           
-                                debug('new sell order detected ' + order.symbolId);
-                                createSellOrder(order)
-                                break;
-                        }
-                        break;
+//--------------USER DATA------------
+function onUserData() {
+  client.ws.user(async msg => {
+    switch (msg.eventType) {
+      case "executionReport":
+        const order = Object.assign({ symbolId: msg.symbol }, msg);
+        delete order.symbol;
+        switch (msg.side) {
+          case "BUY":
+            switch (msg.orderStatus) {
+              case "NEW":
+                //new order
+                debug("new order detected " + order.symbolId);
+                createOrder(order);
+                publish("order:new", order);
+                break;
+              case "FILLED":
+                //filled bid
+                order.strategy = await loadOrderStrategy(order);
+                await saveTrade(order);
+                deleteOrder(order);
+                observeTrade(order);
+                publish("trade:new", order);
+                break;
+              case "EXPIRED":
+                //filled bid
+                debug("order expired " + order.symbolId);
+                deleteOrder(order);
+                publish("order:expired", order);
+                break;
+              case "CANCELED":
+                debug("order CANCELED " + order.symbolId);
+                order.newClientOrderId = msg.originalClientOrderId;
+                deleteOrder(order);
+                publish("order:canceled", order);
+                break;
+            }
+            break;
+          case "SELL":
+            switch (msg.orderStatus) {
+              case "NEW":
+                //new order
+                debug("new sell order detected " + order.symbolId);
+                // createSellOrder(order);
+                // publish("trade:new", order);
+                break;
+              case "FILLED":
+                //filled bid
+                deleteTrade(order);
+                publish("trade:end", order);
+                break;
+              case "REJECTED":
+                switch (msg.orderRejectReason) {
+                  case "INSUFFICIENT_BALANCE":
+                    deleteTrade(order);
+                    break;
                 }
                 break;
-            case "account":
-                saveBalances('binance',msg.balances);
-                break;
+            }
+            break;
         }
-    });
+        break;
+      case "account":
+        saveBalances("binance", msg.balances);
+        break;
+    }
+  });
 }
 
 async function observeTrade(trade) {
-    listenTick(trade.symbol, tick => {
-        trade.lastPrice = tick.price;
-        trade.change = computeChange(trade.bid, tick.price);
+  const clear = listenTick(trade.symbolId, async tick => {
+    trade = trade && (await loadTrade(trade));
+    if (!trade) return clear();
 
-        if (!trade.maxChange || trade.maxChange < trade.change) {
-            trade.maxChange = trade.change;
-        }
-        if (!trade.minChange || trade.minChange > trade.change) {
-            trade.maxChange = trade.change;
-        }
-        saveTrade(trade)
-        publish('tradeChanged', JSON.stringify(trade))
-    });
+    trade.lastPrice = +tick.curDayClose;
+    trade.lastChange = trade.change;
+    trade.change = computeChange(trade.price, trade.lastPrice);
+
+    if (!trade.maxChange || trade.maxChange < trade.change) {
+      trade.maxChange = trade.change;
+    }
+    if (!trade.minChange || trade.minChange > trade.change) {
+      trade.minChange = trade.change;
+    }
+
+    if (
+      !trade.publishedChange ||
+      Math.abs(trade.publishedChange - trade.change) > 0.1
+    ) {
+      publish("trade:changed", trade);
+      trade.publishedChange = trade.change;
+    }
+
+    saveTrade(trade);
+  });
 }
