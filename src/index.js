@@ -224,8 +224,8 @@ async function observeTrade(trade) {
       !trade.publishedChange ||
       Math.abs(trade.publishedChange - trade.change) > 0.1
     ) {
-      publish("trade:changed", trade);
       trade.publishedChange = trade.change;
+      publish("trade:changed", trade);      
     }
 
     saveTrade(trade);
