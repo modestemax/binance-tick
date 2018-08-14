@@ -206,28 +206,18 @@ function onUserData() {
 
 async function observeTrade(trade) {
   const clear = listenTick(trade.symbolId, async tick => {
-    trade = trade && (await loadTrade(trade));
-    if (!trade) return clear();
+    if (!(await loadTrade(trade))) return clear();
 
     trade.lastPrice = +tick.curDayClose;
     trade.lastChange = trade.change;
     trade.change = computeChange(trade.price, trade.lastPrice);
+    if (trade.change !== trade.lastChange) {
+      trade.maxChange = _.max([trade.maxChange, trade.change]);
+      trade.minChange = _.min([trade.minChange, trade.change]);
 
-    if (!trade.maxChange || trade.maxChange < trade.change) {
-      trade.maxChange = trade.change;
+      if (Math.abs(trade.lastChange - trade.change) > 0.1) {
+        publish("trade:changed", trade);
+      }
     }
-    if (!trade.minChange || trade.minChange > trade.change) {
-      trade.minChange = trade.change;
-    }
-
-    if (
-      !trade.publishedChange ||
-      Math.abs(trade.publishedChange - trade.change) > 0.1
-    ) {
-      trade.publishedChange = trade.change;
-      publish("trade:changed", trade);      
-    }
-
-    saveTrade(trade);
   });
 }
